@@ -192,14 +192,14 @@
     <div class="field" style="margin:0"><label>Nextcloud URL</label><input type="text" id="cfgUrl" placeholder="https://your.nextcloud.com" /></div>
     <div class="field" style="margin:0"><label>Username</label><input type="text" id="cfgUser" placeholder="your-username" /></div>
     <div class="field" style="margin:0"><label>App password</label><input type="text" id="cfgPass" placeholder="app-password" /></div>
-    <div class="field" style="margin:0"><label>File path</label><input type="text" id="cfgPath" placeholder="/Recipes/dinner.json" /></div>
+    <div class="field" style="margin:0"><label>File path</label><input type="text" id="cfgPath" placeholder="/Shared/Dinner/dinner.json" /></div>
   </div>
   <div style="display:flex;gap:8px;margin:.75rem auto 0;max-width:680px;">
     <button class="btn btn-primary" onclick="saveSettings()">Save &amp; connect</button>
     <button class="btn" onclick="testConnection()">Test</button>
     <button class="btn" onclick="toggleSettings()">Cancel</button>
   </div>
-  <p class="settings-note">Base URL only — no /login or /index.php. The parent folder must already exist; the file is created automatically.</p>
+  <p class="settings-note">Base URL only — no /login or /index.php. File path is relative to your Nextcloud root, NOT your computer: use /Shared/Dinner/dinner.json, never /home/you/Nextcloud/… Missing folders are created automatically.</p>
 </div>
 
 <main class="main">
@@ -895,14 +895,54 @@ async function syncNow(announce){
     if(announce) toast('Sync failed — check settings / CORS');
   }
 }
-async function push(){
+// Creates each missing parent folder of cfg.path on Nextcloud.
+// Returns true if the whole chain now exists, false if it couldn't be built.
+async function ensureFolders(){
+  const segs = cfg.path.split('/').filter(Boolean);
+  segs.pop(); // last segment is the file itself
+  if(!segs.length) return true;
+  let cur = '';
+  for(const s of segs){
+    cur += '/' + encodeURIComponent(s);
+    const url = cfg.url + '/remote.php/dav/files/' + encodeURIComponent(cfg.user) + cur;
+    try{
+      const r = await fetch(url,{method:'MKCOL',headers:{'Authorization':authHdr()}});
+      // 201 = created, 405 = already exists. Both are fine.
+      if(!r.ok && r.status !== 405){
+        console.warn('Could not create folder',cur,'HTTP',r.status);
+        return false;
+      }
+    }catch(e){
+      // MKCOL may be blocked by CORS even when GET/PUT are allowed
+      console.warn('MKCOL blocked or failed for',cur,e);
+      return false;
+    }
+  }
+  return true;
+}
+
+async function push(retry){
   if(!configured()) return;
   if(!navigator.onLine){ dirty=true; setSync('offline','offline — will retry'); return; }
   setSync('syncing','saving…');
   try{
     const body=JSON.stringify({version:2,recipes,chat:chatMessages,meta,updatedAt:now()},null,2);
     const r=await fetch(webdavUrl(),{method:'PUT',headers:{'Authorization':authHdr(),'Content-Type':'application/json'},body});
-    if(r.status===409){ setSync('error','folder missing'); toast('Parent folder does not exist on Nextcloud'); return; }
+    // Nextcloud returns 409, and sometimes 404, when the parent folder is missing
+    if((r.status===409 || r.status===404) && !retry){
+      setSync('syncing','creating folders…');
+      const ok = await ensureFolders();
+      if(ok) return push(true);
+      setSync('error','folder missing');
+      toast('Folder not found. Check the path matches Nextcloud, not your local disk.');
+      return;
+    }
+    if(r.status===409 || r.status===404){
+      setSync('error','folder missing');
+      toast('Folder not found. Check the path matches Nextcloud, not your local disk.');
+      return;
+    }
+    if(r.status===401){ setSync('error','bad login'); toast('Login rejected — check the app password'); return; }
     if(!r.ok) throw new Error('HTTP '+r.status);
     dirty=false; setSync('synced','synced '+stamp());
   }catch(e){
