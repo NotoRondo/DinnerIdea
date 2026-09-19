@@ -1,5 +1,5 @@
 // Dinner? service worker — app shell caching for offline use
-const CACHE = "dinner-v4";
+const CACHE = "dinner-v5";
 const SHELL = [
   './',
   './index.html',
